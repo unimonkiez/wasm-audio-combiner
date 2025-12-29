@@ -1,5 +1,5 @@
 [package]
-name = "wasm"
+name = "wasm-audio-combiner"
 version = "0.1.0"
 authors = ["Yuval Saraf <unimonkiez@gmail.com>"]
 edition = "2018"

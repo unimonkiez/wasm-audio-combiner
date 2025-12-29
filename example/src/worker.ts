@@ -25,6 +25,9 @@ const api = {
             // deno-lint-ignore require-await
             async combine(volumes: Uint8Array) {
                 const resultFile = combiner.combine(volumes);
+                if (!("bytes" in resultFile)) {
+                    throw resultFile;
+                }
                 // Return just the bytes. This is a standard JS Uint8Array
                 // which Comlink can pass back perfectly.
                 return {

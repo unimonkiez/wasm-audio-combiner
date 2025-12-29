@@ -57,6 +57,9 @@ function App() {
 
     let audioType: string = "";
     switch (file.type) {
+      case wasm.SingleAudioFileType.Wav:
+        audioType = "audio/wav";
+        break;
       case wasm.SingleAudioFileType.Mpeg:
         audioType = "audio/mpeg";
         break;
@@ -120,7 +123,11 @@ function App() {
         selectedFiles.map(async (file) => {
           return {
             bytes: new Uint8Array(await file.arrayBuffer()),
-            type: wasm.SingleAudioFileType.Mpeg,
+            type:
+              {
+                "audio/mpeg": wasm.SingleAudioFileType.Mpeg,
+                "audio/wav": wasm.SingleAudioFileType.Wav,
+              }[file.type] ?? wasm.SingleAudioFileType.Mpeg,
           };
         })
       )
@@ -224,7 +231,7 @@ function App() {
       >
         <input
           type="file"
-          accept=".mp3"
+          accept=".mp3,.wav"
           multiple
           onChange={handleFileChange}
           ref={fileInputRef}
