@@ -133,8 +133,24 @@ impl AudioCombiner {
             .await
             .map_err(|e| format!("Failed to request adapter: {}", e))?; // request_adapter returns Result
 
+        let mut limits = wgpu::Limits::downlevel_defaults(); // Start with safe defaults
+                                                             // Get the maximum the current hardware can actually handle
+        let adapter_limits = adapter.limits();
+
+        // Request the maximum possible storage binding size supported by this GPU
+        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        // You should also bump this to allow the total buffer size to be large
+        limits.max_buffer_size = adapter_limits.max_buffer_size;
+
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("AudioMixerDevice"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits, // Pass the upgraded limits here
+                memory_hints: Default::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(|e| e.to_string())?;
 
