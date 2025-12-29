@@ -1,6 +1,12 @@
-import React, { useState, useRef } from "react";
-import * as wasm from "wasm";
+import React from "react";
 import "./App.css";
+import * as Comlink from "comlink";
+import Worker from "./worker.ts?worker";
+import type { Api } from "./worker.ts";
+import * as wasm from "wasm";
+
+const worker = new Worker();
+const api: Api = Comlink.wrap(worker);
 
 interface AudioFile {
   id: string;
@@ -9,40 +15,98 @@ interface AudioFile {
   volume: number;
 }
 
+function assertNever(value: never) {
+  throw new Error("Unexpected value: " + value);
+}
+
+// function usePrevious<T>(value: T): T | undefined {
+//   const ref = React.useRef<T>();
+//   React.useEffect(() => {
+//     ref.current = value;
+//   }, [value]);
+//   return ref.current;
+// }
+
 function App() {
-  const [files, setFiles] = useState<AudioFile[]>([]);
-  const [combinedUrl, setCombinedUrl] = useState<string | null>(null);
+  const [files, setFiles] = React.useState<AudioFile[]>([]);
 
   // Persist the WASM instance and the Audio element
-  const mergerRef = useRef<wasm.FilesMerger>(null); // Replace 'any' with wasm.FilesMerger type if available
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioCombinerRef =
+    React.useRef<Awaited<ReturnType<typeof api.createCombiner>>>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  // Helper to update the player source and maintain playback position
-  const updateAudioSource = (combinedData: ArrayBuffer) => {
-    const blob = new Blob([combinedData], {
-      type: "audio/mpeg",
-    });
-    const url = URL.createObjectURL(blob);
+  const audioRef = React.useRef<HTMLAudioElement>(null); // Visible Player
+  const loaderRef = React.useRef<HTMLAudioElement>(null); // Hidden Probe
+  const isSwappingRef = React.useRef(false);
+  const pendingUpdateRef = React.useRef<{
+    bytes: Uint8Array<ArrayBufferLike>;
+    type: wasm.SingleAudioFileType;
+  } | null>(null);
 
-    if (audioRef.current) {
-      const currentTime = audioRef.current.currentTime;
-      const isPaused = audioRef.current.paused;
+  const updateAudioSource = (file: {
+    bytes: Uint8Array<ArrayBufferLike>;
+    type: wasm.SingleAudioFileType;
+  }) => {
+    // 1. If we are already busy swapping, queue the latest file and exit
+    if (isSwappingRef.current) {
+      pendingUpdateRef.current = file;
+      return;
+    }
 
-      // Revoke old URL to free memory
-      if (combinedUrl) URL.revokeObjectURL(combinedUrl);
+    isSwappingRef.current = true;
 
-      setCombinedUrl(url);
+    let audioType: string = "";
+    switch (file.type) {
+      case wasm.SingleAudioFileType.Mpeg:
+        audioType = "audio/mpeg";
+        break;
+      case wasm.SingleAudioFileType.Ogg:
+        audioType = "audio/ogg";
+        break;
+      default:
+        assertNever(file.type);
+        break;
+    }
+    const blob = new Blob([file.bytes as BlobPart], { type: audioType });
+    const newUrl = URL.createObjectURL(blob);
 
-      // Restore position on next tick
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.currentTime = currentTime;
-          if (!isPaused) audioRef.current.play().catch(() => {});
+    const mainAudio = audioRef.current;
+    const loaderAudio = loaderRef.current;
+
+    if (mainAudio && loaderAudio) {
+      // 2. Load the file into the hidden "loader" element first
+      loaderAudio.src = newUrl;
+      loaderAudio.load();
+
+      const handleReady = () => {
+        // 3. Sync state from visible player
+        const currentTime = mainAudio.currentTime;
+        const isPlaying = !mainAudio.paused;
+
+        // 4. Swap the URL to the main player
+        if (mainAudio.src) {
+          URL.revokeObjectURL(mainAudio.src);
         }
-      }, 0);
-    } else {
-      setCombinedUrl(url);
+        mainAudio.src = newUrl;
+
+        // We must call load() and restore state on the main player
+        mainAudio.load();
+        mainAudio.currentTime = currentTime;
+        if (isPlaying)
+          mainAudio.play().catch((e) => console.error("Playback error:", e));
+
+        // 5. Cleanup and check for pending updates
+        isSwappingRef.current = false;
+        loaderAudio.removeEventListener("canplaythrough", handleReady);
+
+        if (pendingUpdateRef.current) {
+          const nextFile = pendingUpdateRef.current;
+          pendingUpdateRef.current = null;
+          updateAudioSource(nextFile);
+        }
+      };
+
+      loaderAudio.addEventListener("canplaythrough", handleReady);
     }
   };
 
@@ -51,13 +115,19 @@ function App() {
     if (selectedFiles.length === 0) return;
 
     // Initialize/Reset the merger instance
-    const filesMerger = wasm.FilesMerger.new();
+    const audioCombiner = await api.createCombiner(
+      await Promise.all(
+        selectedFiles.map(async (file) => {
+          return {
+            bytes: new Uint8Array(await file.arrayBuffer()),
+            type: wasm.SingleAudioFileType.Mpeg,
+          };
+        })
+      )
+    );
 
     const newFiles = await Promise.all(
       selectedFiles.map(async (file) => {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        filesMerger.add_file(bytes); // Add to WASM memory
-
         const duration = await getAudioDuration(file);
         return {
           id: Math.random().toString(36).substring(2, 9),
@@ -68,17 +138,16 @@ function App() {
       })
     );
 
-    // Save the merger and the files list
-    mergerRef.current = filesMerger;
+    audioCombinerRef.current = audioCombiner;
     setFiles(newFiles);
 
     // Initial combine
     const initialVolumes = new Uint8Array(newFiles.map(() => 100));
-    const combinedFile = filesMerger.combine(initialVolumes);
-    updateAudioSource(combinedFile.buffer as ArrayBuffer);
+    const combinedFile = await audioCombinerRef.current.combine(initialVolumes);
+    updateAudioSource(combinedFile);
   };
 
-  const updateVolume = (id: string, value: number) => {
+  const updateVolume = async (id: string, value: number) => {
     // 1. Update the state for the UI
     const updatedFiles = files.map((f) =>
       f.id === id ? { ...f, volume: value } : f
@@ -86,10 +155,10 @@ function App() {
     setFiles(updatedFiles);
 
     // 2. Use the persisted merger to get new audio data
-    if (mergerRef.current) {
+    if (audioCombinerRef.current) {
       const volumes = new Uint8Array(updatedFiles.map((f) => f.volume));
-      const combinedFile = mergerRef.current.combine(volumes);
-      updateAudioSource(combinedFile.buffer as ArrayBuffer);
+      const combinedFile = await audioCombinerRef.current.combine(volumes);
+      updateAudioSource(combinedFile);
     }
   };
 
@@ -142,8 +211,7 @@ function App() {
 
   const reset = () => {
     setFiles([]);
-    setCombinedUrl(null);
-    mergerRef.current = null;
+    audioCombinerRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -166,28 +234,37 @@ function App() {
           Choose MP3 Files
         </label>
       </div>
+      <div
+        className="player-section"
+        style={{
+          marginBottom: "20px",
+          padding: "15px",
+          background: "#f4f4f4",
+          borderRadius: "8px",
+          display: files.length === 0 ? "none" : "initial",
+        }}
+      >
+        <h3
+          style={{
+            marginTop: 0,
+          }}
+        >
+          Global Preview
+        </h3>
+        {/* Visible Main Player */}
+        <audio ref={audioRef} controls style={{ width: "100%" }} />
+
+        {/* Hidden Loader (Invisible to user) */}
+        <audio
+          ref={loaderRef}
+          style={{ display: "none" }}
+          preload="auto"
+          muted
+        />
+      </div>
+
       {files.length === 0 ? null : (
         <div className="list-container">
-          <div
-            className="player-section"
-            style={{
-              marginBottom: "20px",
-              padding: "15px",
-              background: "#f4f4f4",
-              borderRadius: "8px",
-            }}
-          >
-            <h3 style={{ marginTop: 0 }}>Global Preview</h3>
-            {combinedUrl && (
-              <audio
-                ref={audioRef}
-                controls
-                src={combinedUrl}
-                style={{ width: "100%" }}
-              />
-            )}
-          </div>
-
           <ul className="file-list">
             {files.map((file) => (
               <li key={file.id} className="file-item">

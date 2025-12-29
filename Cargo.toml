@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
+symphonia = { version = "0.5", features = ["mp3", "ogg", "vorbis", "wav"] }
 wasm-bindgen = "0.2.84"
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
